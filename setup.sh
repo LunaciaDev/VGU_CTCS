@@ -82,7 +82,7 @@ sudo sudo -u postgres psql -d companyxwarehouse -c "\
 
 python -m venv .venv/etl
 source .venv/etl/bin/activate
-pip install python-dotenv pymssql psycopg[binary]
+pip install python-dotenv pymssql psycopg[binary] --no-input
 deactivate
 
 # --- Finish Python ETL
