@@ -75,6 +75,7 @@ sudo sudo -u postgres psql -d companyxwarehouse -c "\
         GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO $POSTGRES_APP_ACC;"
 
 # [TODO]: Create the Star Schema inside the database
+# sudo sudo -u postgres psql -d companyxwarehouse --file=warehouse_schema.sql
 
 # --- Finish Preparing PostgreSQL ---
 
