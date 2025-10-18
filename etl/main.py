@@ -373,7 +373,7 @@ def initial_load(batch_id: int):
                     """SELECT TOP 500 c.CustomerID, p.BusinessEntityID
                     FROM Person.Person AS p
                     JOIN Sales.Customer AS c ON c.PersonID = p.BusinessEntityID
-                    WHERE c.CustomerID > %d
+                    WHERE c.CustomerID > %d AND p.PersonType = 'IN'
                     ORDER BY c.CustomerID""",
                     (batch_id,),
                 )
