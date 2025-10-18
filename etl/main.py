@@ -270,7 +270,7 @@ def update_database(
         MaxTime = MAX(s.OrderDate)
     FROM Sales.Customer AS c
     JOIN Sales.SalesOrderHeader AS s ON s.CustomerID = c.CustomerID
-    WHERE s.Status != 6 AND c.CustomerID = 11019
+    WHERE s.Status != 6 AND c.CustomerID = %s
     GROUP BY DATEPART(year, s.OrderDate), DATEPART(month, s.OrderDate)
     ORDER BY OrderYear, OrderMonth""",
         (customer_id,),
