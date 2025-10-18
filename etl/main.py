@@ -1,6 +1,6 @@
 import calendar
 from collections import namedtuple
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from os import getenv
 import re
@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 import psycopg
 import pymssql
 import xml.etree.ElementTree as ET
-from math import ceil
 
 # Configurations
 load_dotenv()
@@ -23,48 +22,6 @@ POSTGRES_APP_PASS = getenv("POSTGRES_APP_PASS")
 
 NAMESPACE_MATCHER = re.compile(r"\{(.*)\}")
 
-CustomerData = namedtuple(
-    "CustomerData", ["customerid", "name", "gender", "email_promotion_type"]
-)
-
-
-def get_dim_customer(
-    customer_id: int, business_entity_id: int, cur: pymssql.Cursor
-) -> CustomerData:
-    cur.execute(
-        """SELECT p.FirstName, p.MiddleName, p.LastName, p.Suffix, p.Demographics, p.EmailPromotion
-            FROM Person.Person AS p
-            WHERE p.BusinessEntityID = %d""",
-        (business_entity_id,),
-    )
-
-    # CustomerID is unique
-    row = cur.fetchone()
-
-    # Construct data
-    root = ET.fromstring(row["Demographics"])
-    match = NAMESPACE_MATCHER.match(root.tag)
-    namespace = match.group(1) if match is not None else ""
-    gender = root.find(f"{{{namespace}}}Gender")
-
-    return CustomerData(
-        customerid=customer_id,
-        gender=gender.text if gender is not None else None,
-        name=" ".join(
-            filter(
-                None,
-                [
-                    row["FirstName"],
-                    row["MiddleName"],
-                    row["LastName"],
-                    row["Suffix"],
-                ],
-            )
-        ),
-        email_promotion_type=row["EmailPromotion"],
-    )
-
-
 DemographicData = namedtuple(
     "DemographicData",
     [
@@ -78,27 +35,48 @@ DemographicData = namedtuple(
     ],
 )
 
+CustomerData = namedtuple(
+    "CustomerData", ["customerid", "name", "gender", "email_promotion_type"]
+)
 
-def get_dim_demographic(
-    business_entity_id: int, cur: pymssql.Cursor
-) -> DemographicData:
-    cur.execute(
-        """SELECT p.Demographics
-            FROM Person.Person AS p
-            WHERE p.BusinessEntityID = %d""",
-        (business_entity_id,),
-    )
+GeographicData = namedtuple(
+    "GeographicData",
+    ["city_name", "state_province_name", "country_region_name", "territory_name"],
+)
 
-    # CustomerID is unique
-    row = cur.fetchone()
 
-    # Construct data
-    root = ET.fromstring(row["Demographics"])
-    match = NAMESPACE_MATCHER.match(root.tag)
-    namespace = match.group(1) if match is not None else ""
+def generate_date_key(pg_cur: psycopg.Cursor, ms_cur: pymssql.Cursor):
+    generator_sql = """
+    SELECT DISTINCT TOP 1
+        Month = DATEPART(month, header.OrderDate),
+        Year = DATEPART(year, header.OrderDate)
+    FROM Sales.SalesOrderHeader AS header
+    ORDER BY Year, Month
+    """
 
-    # [TODO]: What if parse fails? Right now this thing assume all data is filled.
+    ms_cur.execute(generator_sql)
+    data = ms_cur.fetchone()
+    start = [data["Month"], data["Year"]]
+    end = (date.today().month, date.today().year)
 
+    with pg_cur.copy(
+        """COPY dimtime (timekey, "Day", "Month", "Year") FROM STDIN"""
+    ) as copy:
+        while start[0] <= end[0] or start[1] <= end[1]:
+            day = calendar.monthrange(start[1], start[0])[1]
+            copy.write_row(
+                (start[1] * 10000 + start[0] * 100 + day, day, start[0], start[1])
+            )
+
+            if start[0] == 12:
+                start[0] = 1
+                start[1] += 1
+                continue
+
+            start[0] += 1
+
+
+def generate_demographics(root: ET.Element, namespace: str) -> DemographicData:
     marital_status = root.find(f"{{{namespace}}}MaritalStatus").text
     birth_date = root.find(f"{{{namespace}}}BirthDate").text
     yearly_income_level = root.find(f"{{{namespace}}}YearlyIncome").text
@@ -151,68 +129,120 @@ def get_dim_demographic(
     )
 
 
-GeographicData = namedtuple(
-    "GeographicData",
-    ["city_name", "state_province_name", "country_region_name", "territory_name"],
-)
-
-
-def get_dim_geographic(business_entity_id: int, cur: pymssql.Cursor) -> GeographicData:
-    cur.execute(
-        """SELECT a.City, s.Name as StateProvince, c.Name as Country, t.Name as Territory
-            FROM Person.BusinessEntityAddress AS i
-            JOIN Person.Address AS a ON i.AddressID = a.AddressID
-            JOIN Person.StateProvince AS s ON s.StateProvinceID = a.StateProvinceID
-            JOIN Person.CountryRegion AS c ON c.CountryRegionCode = s.CountryRegionCode
-            JOIN Sales.SalesTerritory AS t ON s.TerritoryID = t.TerritoryID
-            WHERE i.BusinessEntityID = %s""",
-        (business_entity_id,),
-    )
-
-    row = cur.fetchone()
-
-    return GeographicData(
-        city_name=row["City"],
-        state_province_name=row["StateProvince"],
-        country_region_name=row["Country"],
-        territory_name=row["Territory"],
-    )
-
-
-def month_iterator(start: date, end: date):
-    """
-    Iterator that yield date object from start to end.
-    Each time, yield +1 month:
-    ie. April 2022, May 2022, June 2022, ...
-    """
-
-    current = date(start.year, start.month, 1)
-    current = current.replace(day=calendar.monthrange(current.year, current.month)[1])
-    final = date(end.year, end.month, 1)
-    final = final.replace(day=calendar.monthrange(final.year, final.month)[1])
-
-    while current <= final:
-        yield current
-
-        if current.month == 12:
-            current = date(current.year + 1, 1, 1)
-            current = current.replace(day=calendar.monthrange(current.year, current.month)[1])
-
-        else:
-            current = date(current.year, current.month + 1, 1)
-            current = current.replace(day=calendar.monthrange(current.year, current.month)[1])
-
-
-def update_database(
-    customer_data: CustomerData,
-    demographic_data: DemographicData,
-    geographic_data: GeographicData,
-    customer_id: int,
-    pg_cur: psycopg.Cursor,
-    mssql_cur: pymssql.Cursor,
+def load_customer(
+    pg_cur: psycopg.Cursor, ms_cur: pymssql.Cursor, customer_id: int, entity_id: int
 ):
-    current_date = date.today()
-    # Assemble foreign keys
+    dimensions_sql = """
+    SELECT
+        FirstName = person.FirstName,
+        MiddleName = person.MiddleName,
+        LastName = person.LastName,
+        Suffix = person.Suffix,
+        Demographics = person.Demographics,
+        EmailPromotion = person.EmailPromotion,
+        CityName = address_data.City,
+        StateName = state_data.Name,
+        CountryName = country_data.Name,
+        TerritoryName = territory_data.Name
+    FROM Person.Person AS person
+        JOIN Person.BusinessEntityAddress AS person_address ON person.BusinessEntityID = person_address.BusinessEntityID
+        JOIN Person.Address AS address_data ON person_address.AddressID = address_data.AddressID
+        JOIN Person.StateProvince AS state_data ON state_data.StateProvinceID = address_data.StateProvinceID
+        JOIN Person.CountryRegion AS country_data ON state_data.CountryRegionCode = country_data.CountryRegionCode
+        JOIN Sales.SalesTerritory AS territory_data ON state_data.TerritoryID = territory_data.TerritoryID
+    WHERE person.BusinessEntityID = %s
+    """
+
+    sales_aggregate_sql = """
+    WITH StartMonth AS (
+        SELECT 
+            DATEADD(MONTH, DATEDIFF(MONTH, 0, MIN(OrderDate)), 0) AS MinMonthStart
+        FROM Sales.SalesOrderHeader
+    ),
+    Numbers AS (
+        SELECT TOP (DATEDIFF(MONTH, (SELECT MinMonthStart FROM StartMonth), GETDATE()) + 1) 
+            ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) - 1 AS n
+        FROM sys.all_objects
+    ),
+    Months AS (
+        SELECT 
+            YEAR(DATEADD(MONTH, n, (SELECT MinMonthStart FROM StartMonth))) AS OrderYear,
+            MONTH(DATEADD(MONTH, n, (SELECT MinMonthStart FROM StartMonth))) AS OrderMonth
+        FROM Numbers
+    ),
+    CustomerMonths AS (
+        SELECT
+            c.CustomerID,
+            m.OrderYear,
+            m.OrderMonth
+        FROM Sales.Customer AS c
+        CROSS JOIN Months m
+        WHERE c.CustomerID = %s
+    )
+    SELECT
+        cm.CustomerID,
+        cm.OrderYear,
+        cm.OrderMonth,
+        ISNULL(SUM(s.SubTotal), 0) AS MonthTotal,
+        COUNT(s.SalesOrderID) AS MonthCount,
+        MAX(s.OrderDate) AS MaxTime
+    FROM CustomerMonths cm
+    LEFT JOIN Sales.SalesOrderHeader s
+        ON s.CustomerID = cm.CustomerID
+        AND DATEPART(year, s.OrderDate) = cm.OrderYear
+        AND DATEPART(month, s.OrderDate) = cm.OrderMonth
+        AND s.Status != 6
+    GROUP BY
+        cm.CustomerID,
+        cm.OrderYear,
+        cm.OrderMonth
+    ORDER BY
+        cm.OrderYear,
+        cm.OrderMonth,
+        cm.CustomerID
+    """
+
+    # First, assemble the data
+    ms_cur.execute(dimensions_sql, (entity_id,))
+    data = ms_cur.fetchone()  # BEID is unique
+
+    root = ET.fromstring(data["Demographics"])
+    match = NAMESPACE_MATCHER.match(root.tag)
+    namespace = match.group(1) if match is not None else ""
+
+    ## Demographics
+    demographic_data = generate_demographics(root, namespace)
+
+    ## Customer
+    gender = root.find(f"{{{namespace}}}Gender")
+    customer_data = CustomerData(
+        customerid=customer_id,
+        gender=gender.text if gender is not None else None,
+        name=" ".join(
+            filter(
+                None,
+                [
+                    data["FirstName"],
+                    data["MiddleName"],
+                    data["LastName"],
+                    data["Suffix"],
+                ],
+            )
+        ),
+        email_promotion_type=data["EmailPromotion"],
+    )
+
+    ## Geographic
+    geographic_data = GeographicData(
+        city_name=data["CityName"],
+        state_province_name=data["StateName"],
+        country_region_name=data["CountryName"],
+        territory_name=data["TerritoryName"],
+    )
+
+    # Now, get the surrogate keys
+    # It's SIMPLE~ It first do a select to check if the row exist
+    # If not, an INSERT is performed that immediately return the surrogate key.
     customer_data_fk = pg_cur.execute(
         """SELECT d.customerkey
         FROM dimcustomer AS d
@@ -261,106 +291,76 @@ def update_database(
     else:
         geographic_data_fk = geographic_data_fk[0]
 
-    # Fetch Sales Data
-    mssql_cur.execute(
-        """SELECT OrderMonth = DATEPART(month, s.OrderDate),
-        OrderYear = DATEPART(year, s.OrderDate),
-        MonthTotal = SUM(s.SubTotal),
-        MonthCount = COUNT(s.SalesOrderID),
-        MaxTime = MAX(s.OrderDate)
-    FROM Sales.Customer AS c
-    JOIN Sales.SalesOrderHeader AS s ON s.CustomerID = c.CustomerID
-    WHERE s.Status != 6 AND c.CustomerID = %s
-    GROUP BY DATEPART(year, s.OrderDate), DATEPART(month, s.OrderDate)
-    ORDER BY OrderYear, OrderMonth""",
-        (customer_id,),
-    )
+    ## Datetime fk has to be calculated for every row, so we cannot pregenerate
 
-    rows = iter(mssql_cur.fetchall())
-    filled_data: dict[date, (int, int, int)] = {}
-    entry = next(rows)
+    # Finally, bulk data transfer
+    ms_cur.execute(sales_aggregate_sql, (customer_id,))
+    sales_data = ms_cur.fetchall()
 
-    first_purchase_report = date(entry["OrderYear"], entry["OrderMonth"], 1)
-    first_purchase_report = first_purchase_report.replace(day=calendar.monthrange(
-        first_purchase_report.year, first_purchase_report.month
-    )[1])
+    with pg_cur.copy(
+        "COPY factcustomermonthlysnapshot (customerkey, snapshotdatekey, demographickey, geographickey, segmentkey, recency_score, frequency_score, monetary_score) FROM STDIN"
+    ) as copy:
+        for month in sales_data:
+            # compute date_fk
+            lastday_of_month = calendar.monthrange(
+                month["OrderYear"], month["OrderMonth"]
+            )[1]
 
-    for key in month_iterator(first_purchase_report, current_date):
-        if entry is None:
-            filled_data[key] = (1, 1, 1)
-            continue
-
-        if entry["OrderMonth"] == key.month and entry["OrderYear"] == key.year:
-            month_total = entry["MonthTotal"]
-            month_count = entry["MonthCount"]
-            max_time: date = entry["MaxTime"].date()
-
-            recency_raw_score = (
-                calendar.monthrange(key.year, key.month)[1] - max_time.day
-            )
-            recency_score = 5 - max((recency_raw_score - 1) // 7, 0)
-
-            frequency_score = (
-                month_count + 1 if month_count < 3 else (4 if month_count < 5 else 5)
+            date_fk = (
+                month["OrderYear"] * 10000
+                + month["OrderMonth"] * 100
+                + lastday_of_month
             )
 
-            monetary_raw_score = month_total / Decimal(month_count)
-            monetary_score = (
-                5
-                if monetary_raw_score >= 3000
-                else (
-                    4
-                    if monetary_raw_score >= 2000
-                    else (
-                        3
-                        if monetary_raw_score >= 1000
-                        else 2 if monetary_raw_score >= 300 else 1
-                    )
+            # Did we buy anything this month?
+            if month["MaxTime"] is None:
+                # Nope.
+                copy.write_row((customer_data_fk, date_fk, demographic_data_fk, geographic_data_fk, None, 1, 1, 1))
+                continue
+
+            # compute the score
+            raw_recency = lastday_of_month - month["MaxTime"].day
+            raw_monetary = month["MonthTotal"] / month["MonthCount"]
+
+            recency = 5 - max((raw_recency - 1) // 7, 0)
+            frequency = (
+                5 if month["MonthCount"] >= 5 else min(4, month["MonthCount"] + 1)
+            )
+            monetary = 1 if raw_monetary < 300 else min(2 + raw_monetary // 1000, 5)
+
+            # load data
+            copy.write_row(
+                (
+                    customer_data_fk,
+                    date_fk,
+                    demographic_data_fk,
+                    geographic_data_fk,
+                    None,
+                    recency,
+                    frequency,
+                    monetary,
                 )
             )
 
-            filled_data[key] = (recency_score, frequency_score, monetary_score)
-            entry = next(rows, None)
-            continue
-
-        filled_data[key] = (1, 1, 1)
-
-    # We filled in all report from when they started buying to now
-    # Time to slam all of that into the warehouse
-    # Cannot do COPY since we need DateKey
-
-    for key, value in filled_data.items():
-        date_fk = key.year * 10000 + key.month * 100 + key.day
-        pg_cur.execute(
-            """INSERT INTO dimtime (timekey, "Day", "Month", "Year")
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (timekey) DO NOTHING""",
-            (
-                date_fk,
-                key.day,
-                key.month,
-                key.year,
-            ),
-        )
-
-        pg_cur.execute(
-            """INSERT INTO factcustomermonthlysnapshot (customerkey, snapshotdatekey, demographickey, geographickey, segmentkey, recency_score, frequency_score, monetary_score)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-            (
-                customer_data_fk,
-                date_fk,
-                demographic_data_fk,
-                geographic_data_fk,
-                None,
-                value[0],
-                value[1],
-                value[2],
-            ),
-        )
-
 
 def initial_load(batch_id: int):
-    # We do it in batch of 50 customers.
+    # First, create the date dimension
+    with psycopg.connect(
+        f"host={POSTGRES_SERVER} port=5432 dbname={POSTGRES_DB} user={POSTGRES_APP_ACC} password={POSTGRES_APP_PASS}"
+    ) as pg_conn:
+        with pg_conn.cursor() as pg_cur:
+            if pg_cur.execute("SELECT * FROM dimtime LIMIT 1").fetchone() is None:
+                with pymssql.connect(
+                    server="localhost",
+                    user=MSSQL_APP_ACC,
+                    password=MSSQL_APP_PASS,
+                    database="CompanyX",
+                ) as mssql_conn:
+                    with mssql_conn.cursor(as_dict=True) as ms_cur:
+                        generate_date_key(pg_cur, ms_cur)
+
+    # Now, fill in the data, customer by customer.
+    # We will commit every 500 customers
     while True:
         with pymssql.connect(
             server="localhost",
@@ -387,35 +387,19 @@ def initial_load(batch_id: int):
 
                 with psycopg.connect(
                     f"host={POSTGRES_SERVER} port=5432 dbname={POSTGRES_DB} user={POSTGRES_APP_ACC} password={POSTGRES_APP_PASS}"
-                ) as ps_conn:
-                    with ps_conn.cursor() as ps_cur:
-                        for row in rows:
-                            customer_id = row["CustomerID"]
-                            business_entity_id = row["BusinessEntityID"]
+                ) as pg_conn:
+                    with pg_conn.cursor() as pg_cur:
+                        # [TODO]: Somehow, we need to be able to batch more customer at once
+                        # looping is way too slow.
+                        for customer in rows:
+                            customer_id = customer["CustomerID"]
+                            entity_id = customer["BusinessEntityID"]
 
                             batch_id = customer_id
 
-                            # Let's do construction!
-                            # Fetch the data
-                            customer_data = get_dim_customer(
-                                customer_id, business_entity_id, mssql_cur
-                            )
-                            demographic_data = get_dim_demographic(
-                                business_entity_id, mssql_cur
-                            )
-                            geographic_data = get_dim_geographic(
-                                business_entity_id, mssql_cur
-                            )
+                            load_customer(pg_cur, mssql_cur, customer_id, entity_id)
 
-                            update_database(
-                                customer_data,
-                                demographic_data,
-                                geographic_data,
-                                customer_id,
-                                ps_cur,
-                                mssql_cur,
-                            )
-                    ps_conn.commit()
+                    pg_conn.commit()
 
 
 def main():
