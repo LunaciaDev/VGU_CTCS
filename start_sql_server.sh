@@ -10,5 +10,6 @@ until sudo docker exec sql1 /opt/mssql-tools18/bin/sqlcmd \
                        -Q "SELECT 1" > /dev/null 2>&1
 do
     echo "Working on it..."
-    sleep 1
+    sleep 2
 done
+echo "Server is ready!"

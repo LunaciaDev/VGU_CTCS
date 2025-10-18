@@ -73,9 +73,8 @@ sudo sudo -u postgres psql -d companyxwarehouse -c "\
     GRANT USAGE ON SCHEMA public TO $POSTGRES_APP_ACC;
     ALTER DEFAULT PRIVILEGES IN SCHEMA public
         GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO $POSTGRES_APP_ACC;"
+sudo sudo -u postgres psql -d companyxwarehouse --file=warehouse_schema.sql
 
-# [TODO]: Create the Star Schema inside the database
-# sudo sudo -u postgres psql -d companyxwarehouse --file=warehouse_schema.sql
 
 # --- Finish Preparing PostgreSQL ---
 
