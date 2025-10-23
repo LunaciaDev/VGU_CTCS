@@ -1,5 +1,6 @@
 import calendar
 from datetime import datetime, date
+from logging import getLogger
 import re
 import psycopg
 import pymssql
@@ -76,12 +77,10 @@ SELECT DISTINCT TOP 1
 FROM Sales.SalesOrderHeader AS header
 WHERE header.Status != 6 AND header.CustomerID = %s
 ORDER BY header.OrderDate"""
-
+logger = getLogger(__name__)
 
 # Generate report for those month from scratch
-
 # TODO: Generate a connection pool for this task and attempt to multithread.
-
 
 def _month_iterator(start_date: date, end_date: date):
     start = [start_date.year, start_date.month]
@@ -96,14 +95,12 @@ def _month_iterator(start_date: date, end_date: date):
         start[0] += start[1] // 12
         start[1] = start[1] % 12 + 1
 
-
 def _date_conversion(input_date: date):
     return date(
         input_date.year,
         input_date.month,
         calendar.monthrange(input_date.year, input_date.month)[1],
     )
-
 
 def load_fact(
     ms_cur: pymssql.Cursor,
@@ -141,6 +138,8 @@ def load_fact(
     )
 
     customers = ms_cur.fetchall()
+
+    logger.info("Loading %s customers...", len(customers))
 
     for customerID, businessEntityID in customers:
         # Generate snapshots for all month since their first purchase if it does not exist
