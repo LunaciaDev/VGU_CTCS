@@ -53,7 +53,7 @@ def load_time_initial(ms_cur: pymssql.Cursor, pg_cur: psycopg.Cursor):
 def load_time_incremental(
     ms_cur: pymssql.Cursor, pg_cur: psycopg.Cursor, timestamp: datetime.datetime
 ) -> datetime:
-    ms_cur.execute(LOAD_TIME_INC_SQL, {"time": timestamp})
+    ms_cur.execute(LOAD_TIME_INC_SQL, (timestamp, ))
     results = ms_cur.fetchall()
 
     if len(results) == 0 or results is None:

@@ -1,1 +1,1 @@
-*/3 * * * * /workspaces/VGU_CTCS/start_etl.sh
+0 0 1 * * /workspaces/VGU_CTCS/start_etl.sh

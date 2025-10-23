@@ -26,7 +26,7 @@ SELECT
     LastName = person.LastName,
     Suffix = person.Suffix,
     Demographics = person.Demographics,
-    EmailPromotion = person.EmailPromotion
+    EmailPromotion = person.EmailPromotion,
     ModifiedDate = person.ModifiedDate
 FROM Person.Person AS person
 JOIN Sales.Customer AS customer ON person.BusinessEntityID = customer.PersonID

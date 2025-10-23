@@ -7,9 +7,9 @@ import psycopg
 import pymssql
 
 from load_fact import load_fact
-from load_customer_demographic import load_customer_demographic_initial
-from load_geographic import load_geographic_initial
-from load_time import load_time_initial
+from load_customer_demographic import load_customer_demographic_incremental, load_customer_demographic_initial
+from load_geographic import load_geographic_incremental, load_geographic_initial
+from load_time import load_time_incremental, load_time_initial
 
 # Configurations
 load_dotenv()
@@ -25,6 +25,7 @@ TABLE_KEYS = {"time": 0, "geographic": 1, "customer_demographic": 2, "fact": 3}
 logger = getLogger(__name__)
 # Frankly speaking we do not emit anything but INFO, so.
 logging.basicConfig(level=logging.INFO)
+
 
 def _helper_initial_load_dimension(
     mssql_cur: pymssql.Cursor,
@@ -84,7 +85,10 @@ def _initial_load(pg_conn: psycopg.Connection):
 
                 # Dimension are loaded. Now we load the facts
                 timestamp = load_fact(
-                    ms_cur=mssql_cur, pg_cur=pg_cur, run_timestamp=date(2014, 7, 25), pg_conn=pg_conn
+                    ms_cur=mssql_cur,
+                    pg_cur=pg_cur,
+                    run_timestamp=date(2014, 7, 25),
+                    pg_conn=pg_conn,
                 )
                 # log timestamp
                 pg_cur.execute(
@@ -102,9 +106,68 @@ def _initial_load(pg_conn: psycopg.Connection):
                 logger.info("Finished loading facts.")
 
 
-def _incremental_load(pg_conn: psycopg.Connection):
-    pass
+def _helper_incremental_load_dimension(
+    mssql_cur: pymssql.Cursor,
+    pg_cur: psycopg.Cursor,
+    pg_conn: psycopg.Connection,
+    key_function_iterator,
+):
+    for key, function in key_function_iterator:
+        logger.info("Attempting to load %s dimension", key)
 
+        # Check for the update timestamp
+        pg_cur.execute(
+            "SELECT * FROM etlmeta_tabletimestamp AS t WHERE t.tablekey = %s",
+            (TABLE_KEYS[key],),
+        )
+        timestamp = pg_cur.fetchone()[1]
+        # Load the dimension
+        timestamp = function(mssql_cur, pg_cur, timestamp)
+        # Update timestamp and commit.
+        pg_cur.execute(
+            "UPDATE etlmeta_tabletimestamp SET modifieddate = %s WHERE tablekey = %s",
+            (timestamp, TABLE_KEYS[key]),
+        )
+        pg_conn.commit()
+
+
+def _incremental_load(pg_conn: psycopg.Connection):
+    with pymssql.connect(
+        server="localhost",
+        user=MSSQL_APP_ACC,
+        password=MSSQL_APP_PASS,
+        database="CompanyX",
+    ) as mssql_conn:
+        with mssql_conn.cursor() as mssql_cur:
+            with pg_conn.cursor() as pg_cur:
+                _helper_incremental_load_dimension(
+                    mssql_cur,
+                    pg_cur,
+                    pg_conn,
+                    # Pair the key with the corresponding load function
+                    zip(
+                        ["time", "geographic", "customer_demographic"],
+                        [
+                            load_time_incremental,
+                            load_geographic_incremental,
+                            load_customer_demographic_incremental,
+                        ],
+                    ),
+                )
+
+                pg_cur.execute(
+                    "SELECT * FROM etlmeta_tabletimestamp AS t WHERE t.tablekey = %s",
+                    (TABLE_KEYS["fact"], ),
+                )
+                timestamp = pg_cur.fetchone()[1]
+
+                load_fact(
+                    ms_cur=mssql_cur,
+                    pg_cur=pg_cur,
+                    pg_conn=pg_conn,
+                    run_timestamp=date(2014, 7, 25),
+                    last_updated_timestamp=timestamp,
+                )
 
 def main():
     # Check with the warehouse to see if we are doing initial load or incremental load.
@@ -118,7 +181,9 @@ def main():
 
             # If the row was not created
             if result is None:
-                logger.info("Cannot detect previous initial load attempt, starting an initial load.")
+                logger.info(
+                    "Cannot detect previous initial load attempt, starting an initial load."
+                )
                 # Create the row, then start from scratch
                 pg_cur.execute(
                     "INSERT INTO etlmeta_factload (id, loadfinished, batchid, loadingtimestamp) VALUES (%s, %s, %s, %s)",
@@ -130,13 +195,17 @@ def main():
 
             # If the initial load was marked incomplete
             if not result[1]:
-                logger.info("Detected incomplete initial load attempt, resuming from that point.")
+                logger.info(
+                    "Detected incomplete initial load attempt, resuming from that point."
+                )
                 _initial_load(pg_conn)
                 logger.info("Initial load finished. Exiting.")
                 return
 
             # The initial load succeeded, so this is an incremental load run
-            logger.info("Detected a successful initial load attempt, running incremental load.")
+            logger.info(
+                "Detected a successful initial load attempt, running incremental load."
+            )
             _incremental_load(pg_conn)
             logger.info("Incremental load finished. Exiting.")
 
