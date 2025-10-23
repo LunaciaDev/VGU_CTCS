@@ -7,7 +7,11 @@ SELECT DISTINCT
     CityName = address_data.City,
     StateName = state_data.Name,
     CountryName = country_data.Name,
-    TerritoryName = territory_data.Name
+    TerritoryName = territory_data.Name,
+    paModifiedDate = MAX(person_address.ModifiedDate),
+    adModifiedDate = MAX(address_data.ModifiedDate),
+    sdModifiedDate = MAX(state_data.ModifiedDate),
+    tdModifiedDate = MAX(territory_data.ModifiedDate)
 FROM Person.Person AS person
     JOIN Person.BusinessEntityAddress AS person_address ON person.BusinessEntityID = person_address.BusinessEntityID
     JOIN Person.Address AS address_data ON person_address.AddressID = address_data.AddressID
@@ -19,9 +23,9 @@ WHERE person.BusinessEntityID IN (
     FROM Person.Person AS p
         JOIN Sales.Customer AS c ON c.PersonID = p.BusinessEntityID
     WHERE p.PersonType = 'IN'
-)
+) AND person_address.AddressTypeID = 2
+GROUP BY address_data.City, state_data.Name, country_data.Name, territory_data.Name
 """
-
 LOAD_GEOGRAPHIC_SQL_INC = """
 SELECT DISTINCT
     CityName = address_data.City,
@@ -43,24 +47,28 @@ WHERE person.BusinessEntityID IN (
     FROM Person.Person AS p
         JOIN Sales.Customer AS c ON c.PersonID = p.BusinessEntityID
     WHERE p.PersonType = 'IN'
-)
+) AND person_address.AddressTypeID = 2
 AND (person_address.ModifiedDate > %(time)s OR address_data.ModifiedDate > %(time)s OR state_data.ModifiedDate > %(time)s OR territory_data.ModifiedDate > %(time)s)
 """
-
 
 def load_geographic_initial(ms_cur: pymssql.Cursor, pg_cur: psycopg.Cursor):
     ms_cur.execute(LOAD_GEOGRAPHIC_SQL)
     results = ms_cur.fetchall()
 
+    max_timestamp = datetime.datetime.min
+
     with pg_cur.copy(
         "COPY dimgeographic (cityname, stateprovincename, countryregionname, territoryname) FROM STDIN"
     ) as copy:
         for row in results:
-            copy.write_row(row)
+            max_timestamp = max(max_timestamp, row[4], row[5], row[6], row[7])
+            copy.write_row(row[0:4])
+
+    return max_timestamp
 
 
 def load_geographic_incremental(
-    ms_cur: pymssql.Cursor, pg_cur: psycopg.Cursor, timestamp: datetime
+    ms_cur: pymssql.Cursor, pg_cur: psycopg.Cursor, timestamp: datetime.datetime
 ) -> datetime:
     ms_cur.execute(LOAD_GEOGRAPHIC_SQL_INC, {"time": timestamp})
     results = ms_cur.fetchall()

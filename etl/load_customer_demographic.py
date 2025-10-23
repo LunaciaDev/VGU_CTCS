@@ -12,7 +12,8 @@ SELECT
     LastName = person.LastName,
     Suffix = person.Suffix,
     Demographics = person.Demographics,
-    EmailPromotion = person.EmailPromotion
+    EmailPromotion = person.EmailPromotion,
+    ModifiedDate = person.ModifiedDate
 FROM Person.Person AS person
 JOIN Sales.Customer AS customer ON person.BusinessEntityID = customer.PersonID
 WHERE person.PersonType = 'IN'
@@ -33,9 +34,8 @@ WHERE person.ModifiedDate > %s AND person.PersonType = 'IN'
 """
 NAMESPACE_MATCHER = re.compile(r"\{(.*)\}")
 
-
 def parse_name_gender(row) -> tuple[str, str]:
-    name = " ".join(filter(None, row[1], row[2], row[3], row[4]))
+    name = " ".join(filter(None, row[1:5]))
     root = ET.fromstring(row[5])
     match = NAMESPACE_MATCHER.match(root.tag)
     namespace = match.group(1) if match is not None else ""
@@ -44,9 +44,8 @@ def parse_name_gender(row) -> tuple[str, str]:
 
     return (name, gender)
 
-
-def parse_demographic(row) -> tuple:
-    root = ET.fromstring(row[5])
+def parse_demographic(xml) -> tuple:
+    root = ET.fromstring(xml)
     match = NAMESPACE_MATCHER.match(root.tag)
     namespace = match.group(1) if match is not None else ""
 
@@ -103,13 +102,17 @@ def parse_demographic(row) -> tuple:
 
 
 def _load_customer_initial(pg_cur: psycopg.Cursor, data: list[tuple[any, ...]]):
+    max_timestamp = datetime.datetime.min
+
     with pg_cur.copy(
         "COPY dimcustomer (customerid, name, gender, emailpromotiontype) FROM STDIN"
     ) as copy:
         for row in data:
+            max_timestamp = max(max_timestamp, row[7])
             (name, gender) = parse_name_gender(row)
             copy.write_row((row[0], name, gender, row[6]))
 
+    return max_timestamp
 
 def _load_customer_incremental(pg_cur: psycopg.Cursor, data: list[tuple[any, ...]]):
     max_timestamp = datetime.datetime.min
@@ -137,10 +140,10 @@ def _load_demographic(pg_cur: psycopg.Cursor, data: list[tuple[any, ...]]):
     # Geographic can do since the SQL is SELECT DISTINCT
     # Same goes for time, and customer is guaranteed distinct due to source key constraint
     for row in data:
-        demographic_data = parse_demographic(row)
+        demographic_data = parse_demographic(row[5])
         if (
             pg_cur.execute(
-                "SELECT d.demographickey FROM dimdemographic WHERE maritalstatus = %s AND ageband = %s AND yearlyincomelevel = %s AND numbercarsowned = %s AND education = %s AND occupation = %s AND ishomeowner = %s",
+                "SELECT d.demographickey FROM dimdemographic AS d WHERE d.maritalstatus = %s AND d.ageband = %s AND d.yearlyincomelevel = %s AND d.numbercarsowned = %s AND d.education = %s AND d.occupation = %s AND d.ishomeowner = %s",
                 demographic_data,
             ).fetchone()
             is None
@@ -155,12 +158,14 @@ def load_customer_demographic_initial(ms_cur: pymssql.Cursor, pg_cur: psycopg.Cu
     ms_cur.execute(CUSTOMER_DEMOGRAPHIC_SQL)
     data = ms_cur.fetchall()
 
-    _load_customer_initial(pg_cur, data)
+    max_timestamp = _load_customer_initial(pg_cur, data)
     _load_demographic(pg_cur, data)
+
+    return max_timestamp
 
 
 def load_customer_demographic_incremental(
-    ms_cur: pymssql.Cursor, pg_cur: psycopg.Cursor, timestamp: datetime
+    ms_cur: pymssql.Cursor, pg_cur: psycopg.Cursor, timestamp: datetime.datetime
 ):
     ms_cur.execute(CUSTOMER_DEMOGRAPHIC_INC_SQL, (timestamp,))
     data = ms_cur.fetchall()

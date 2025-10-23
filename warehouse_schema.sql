@@ -37,15 +37,16 @@ CREATE TABLE IF NOT EXISTS DimSegment (
   SegmentName  VARCHAR(40) NOT NULL UNIQUE
 );
 
-CREATE TABLE IF NOT EXISTS ETLMeta_Timestamp (
-  TableKey INT PRIMARY KEY,
-  ModifiedDate TIMESTAMP
+CREATE TABLE IF NOT EXISTS ETLMeta_TableTimestamp (
+  TableKey INT PRIMARY KEY, -- Hardcoded Table ID
+  ModifiedDate TIMESTAMP -- If this exists, the initial load is completed.
 );
 
 CREATE TABLE IF NOT EXISTS ETLMeta_InitialLoad (
   ID INT PRIMARY KEY CHECK (ID = 1), -- This table must only have one single row.
+  LoadFinished BOOLEAN, -- has we finished with the load?
   BatchID INT, -- which customerID has we reached?
-  FinishedLoad BOOLEAN -- has we finished with the load?
+  IncrementalBatchID INT -- What batch ID we reached in incremental load?
 );
 
 CREATE TABLE IF NOT EXISTS FactCustomerMonthlySnapshot (
