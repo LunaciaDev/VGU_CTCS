@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS ETLMeta_TableTimestamp (
   ModifiedDate TIMESTAMP -- If this exists, the initial load is completed.
 );
 
-CREATE TABLE IF NOT EXISTS ETLMeta_InitialLoad (
+CREATE TABLE IF NOT EXISTS ETLMeta_FactLoad (
   ID INT PRIMARY KEY CHECK (ID = 1), -- This table must only have one single row.
   LoadFinished BOOLEAN, -- has we finished with the load?
 

@@ -108,10 +108,10 @@ def load_fact(
     pg_cur: psycopg.Cursor,
     pg_conn: psycopg.Connection,
     run_timestamp: date = date.today(),
+    last_updated_timestamp = date(1753, 1, 1)
 ):
     max_update_timestamp = datetime.min
     previous_id = 0
-    last_updated_timestamp = date(1753, 1, 1)
 
     # Insert the current run_timestamp into the fact table, if not exist
     # This is only relevant if the business make no new order on the run_timestamp...
@@ -135,7 +135,7 @@ def load_fact(
     pg_cur.execute(
         """
         SELECT d.batchid, d.loadingtimestamp
-        FROM etlmeta_initialload AS d"""
+        FROM etlmeta_factload AS d"""
     )
     result = pg_cur.fetchone()
     if result[0] is not None:
@@ -143,7 +143,7 @@ def load_fact(
         # Pick up from that point.
         logger.info("Detected an incomplete load. This load will pick up from that point instead of starting from scratch.")
         previous_id = result[0]
-        last_updated_timestamp = result[1]
+        max_update_timestamp = result[1]
 
     # Get our list of customers.
     ms_cur.execute(
@@ -233,7 +233,7 @@ def load_fact(
                 max_update_timestamp = max(max_update_timestamp, entry[-1])
 
         # Finished loading this batch, we update the metadata and commit.
-        pg_cur.execute("UPDATE etlmeta_initialload SET batchid = %s, loadingtimestamp = %s", (last_id, max_update_timestamp))
+        pg_cur.execute("UPDATE etlmeta_factload SET batchid = %s, loadingtimestamp = %s", (last_id, max_update_timestamp))
         pg_conn.commit()
         current_batch_id += 1
 

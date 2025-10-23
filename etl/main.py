@@ -86,14 +86,14 @@ def _initial_load(pg_conn: psycopg.Connection):
                 timestamp = load_fact(
                     ms_cur=mssql_cur, pg_cur=pg_cur, run_timestamp=date(2014, 7, 25), pg_conn=pg_conn
                 )
-                # Load timestamp
+                # log timestamp
                 pg_cur.execute(
                     "INSERT INTO etlmeta_tabletimestamp (tablekey, modifieddate) VALUES (%s, %s)",
                     (TABLE_KEYS["fact"], timestamp),
                 )
                 # Mark initial load as finished
                 pg_cur.execute(
-                    "UPDATE etlmeta_initialload SET loadfinished = %s, batchid = %s, loadingtimestamp = %s",
+                    "UPDATE etlmeta_factload SET loadfinished = %s, batchid = %s, loadingtimestamp = %s",
                     (True, None, None),
                 )
                 pg_conn.commit()
@@ -113,7 +113,7 @@ def main():
         f"host={POSTGRES_SERVER} port=5432 dbname={POSTGRES_DB} user={POSTGRES_APP_ACC} password={POSTGRES_APP_PASS}"
     ) as pg_conn:
         with pg_conn.cursor() as pg_cur:
-            pg_cur.execute("SELECT * FROM etlmeta_initialload")
+            pg_cur.execute("SELECT * FROM etlmeta_factload")
             result = pg_cur.fetchone()
 
             # If the row was not created
@@ -121,7 +121,7 @@ def main():
                 logger.info("Cannot detect previous initial load attempt, starting an initial load.")
                 # Create the row, then start from scratch
                 pg_cur.execute(
-                    "INSERT INTO etlmeta_initialload (id, loadfinished, batchid, loadingtimestamp) VALUES (%s, %s, %s, %s)",
+                    "INSERT INTO etlmeta_factload (id, loadfinished, batchid, loadingtimestamp) VALUES (%s, %s, %s, %s)",
                     (1, False, None, None),
                 )
                 _initial_load(pg_conn)
