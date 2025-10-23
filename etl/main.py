@@ -84,7 +84,7 @@ def _initial_load(pg_conn: psycopg.Connection):
 
                 # Dimension are loaded. Now we load the facts
                 timestamp = load_fact(
-                    ms_cur=mssql_cur, pg_cur=pg_cur, run_timestamp=date(2014, 7, 25)
+                    ms_cur=mssql_cur, pg_cur=pg_cur, run_timestamp=date(2014, 7, 25), pg_conn=pg_conn
                 )
                 # Load timestamp
                 pg_cur.execute(
@@ -93,8 +93,8 @@ def _initial_load(pg_conn: psycopg.Connection):
                 )
                 # Mark initial load as finished
                 pg_cur.execute(
-                    "UPDATE etlmeta_initialload SET loadfinished = %s, incrementalbatchid = %s",
-                    (True, 0),
+                    "UPDATE etlmeta_initialload SET loadfinished = %s, batchid = %s, loadingtimestamp = %s",
+                    (True, None, None),
                 )
                 pg_conn.commit()
 
@@ -121,8 +121,8 @@ def main():
                 logger.info("Cannot detect previous initial load attempt, starting an initial load.")
                 # Create the row, then start from scratch
                 pg_cur.execute(
-                    "INSERT INTO etlmeta_initialload (id, loadfinished, batchid) VALUES (%s, %s, %s)",
-                    (1, False, 0),
+                    "INSERT INTO etlmeta_initialload (id, loadfinished, batchid, loadingtimestamp) VALUES (%s, %s, %s, %s)",
+                    (1, False, None, None),
                 )
                 _initial_load(pg_conn)
                 logger.info("Initial load finished. Exiting.")

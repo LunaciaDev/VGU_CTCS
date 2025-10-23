@@ -1,5 +1,6 @@
 import calendar
 from datetime import datetime, date
+import itertools
 from logging import getLogger
 import re
 import psycopg
@@ -105,10 +106,12 @@ def _date_conversion(input_date: date):
 def load_fact(
     ms_cur: pymssql.Cursor,
     pg_cur: psycopg.Cursor,
-    last_updated_timestamp: date = date(1753, 1, 1),
+    pg_conn: psycopg.Connection,
     run_timestamp: date = date.today(),
 ):
     max_update_timestamp = datetime.min
+    previous_id = 0
+    last_updated_timestamp = date(1753, 1, 1)
 
     # Insert the current run_timestamp into the fact table, if not exist
     # This is only relevant if the business make no new order on the run_timestamp...
@@ -128,75 +131,110 @@ def load_fact(
         ),
     )
 
-    # For each customers:
+    # Do we have previous data?
+    pg_cur.execute(
+        """
+        SELECT d.batchid, d.loadingtimestamp
+        FROM etlmeta_initialload AS d"""
+    )
+    result = pg_cur.fetchone()
+    if result[0] is not None:
+        # We do have data from previous run, that might have not finished.
+        # Pick up from that point.
+        logger.info("Detected an incomplete load. This load will pick up from that point instead of starting from scratch.")
+        previous_id = result[0]
+        last_updated_timestamp = result[1]
+
+    # Get our list of customers.
     ms_cur.execute(
         """
         SELECT c.CustomerID, p.BusinessEntityID
         FROM Person.Person AS p
             JOIN Sales.Customer AS c ON p.BusinessEntityID = c.PersonID
-        WHERE p.PersonType = 'IN'"""
+        WHERE p.PersonType = 'IN' AND c.CustomerID > %s
+        ORDER BY c.CustomerID""",
+        (previous_id, )
     )
-
     customers = ms_cur.fetchall()
 
-    logger.info("Loading %s customers...", len(customers))
+    logger.info("Loading customers...")
+    current_batch_id = 0
 
-    for customerID, businessEntityID in customers:
-        # Generate snapshots for all month since their first purchase if it does not exist
-        ms_cur.execute(START_DATE_SQL, (customerID,))
-        result = ms_cur.fetchone()
-        # Do not do anything if they did not buy anything, obviously.
-        if result is None: continue
-        start_date = _date_conversion(result[0].date())
+    # Batching into group of 500 customers
+    customers_batch_iter = itertools.batched(customers, 500)
 
-        # Get FKs for new snapshots
-        ms_cur.execute(GEOGRAPHIC_SQL, (businessEntityID,))
-        pg_cur.execute(
-            "SELECT d.geographickey FROM dimgeographic AS d WHERE d.cityname = %s AND d.stateprovincename = %s AND d.countryregionname = %s AND d.territoryname = %s",
-            ms_cur.fetchone(),
-        )
-        geographic_fk = pg_cur.fetchone()[0]
+    for customers_batch in customers_batch_iter:
+        logger.info("Processing customers batch %s, loaded %s customers so far", current_batch_id, current_batch_id * 500)
+        last_id = 0
 
-        ms_cur.execute(DEMOGRAPHIC_SQL, (businessEntityID,))
-        pg_cur.execute(
-            "SELECT d.demographickey FROM dimdemographic AS d WHERE d.maritalstatus = %s AND d.ageband = %s AND d.yearlyincomelevel = %s AND d.numbercarsowned = %s AND d.education = %s AND d.occupation = %s AND d.ishomeowner = %s",
-            parse_demographic(ms_cur.fetchone()[0]),
-        )
-        demographic_fk = pg_cur.fetchone()[0]
+        for customerID, businessEntityID in customers_batch:
+            last_id = customerID
 
-        pg_cur.execute(
-            "SELECT d.customerkey FROM dimcustomer AS d WHERE d.customerid = %s",
-            (customerID,),
-        )
-        customer_fk = pg_cur.fetchone()[0]
+            # Do we have any transaction?
+            ms_cur.execute(TRANSACTION_SQL, (last_updated_timestamp, customerID))
+            transactions = ms_cur.fetchall()
 
-        for year, month in _month_iterator(start_date, parsed_run_timestamp):
-            # Create the time key
-            time_key = year * 10000 + month * 100 + calendar.monthrange(year, month)[1]
-            # Attempt to insert default data, on conflict do nothing.
+            if len(transactions) == 0:
+                continue
+
+            # There are transaction, so let's prepare to add them.
+
+            # Get FKs for new snapshots
+            ms_cur.execute(GEOGRAPHIC_SQL, (businessEntityID,))
             pg_cur.execute(
-                """
-                INSERT INTO factcustomermonthlysnapshot (customerkey, snapshotdatekey, demographickey, geographickey, segmentkey, recency_score, frequency_score, monetary_score)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (customerkey, snapshotdatekey) DO NOTHING""",
-                (customer_fk, time_key, demographic_fk, geographic_fk, None, 1, 1, 1),
+                "SELECT d.geographickey FROM dimgeographic AS d WHERE d.cityname = %s AND d.stateprovincename = %s AND d.countryregionname = %s AND d.territoryname = %s",
+                ms_cur.fetchone(),
             )
+            geographic_fk = pg_cur.fetchone()[0]
 
-        # Update months where the customer has updated header
-        # DO NOT TOUCH demographic, geographic key. Just search by customer and snapshot date key.
-
-        ms_cur.execute(TRANSACTION_SQL, (last_updated_timestamp, customerID))
-
-        for entry in ms_cur.fetchall():
-            time_key = entry[1] * 10000 + entry[2] * 100 + entry[3]
+            ms_cur.execute(DEMOGRAPHIC_SQL, (businessEntityID,))
             pg_cur.execute(
-                """
-                UPDATE factcustomermonthlysnapshot
-                SET recency_score = %s, frequency_score = %s, monetary_score = %s
-                WHERE customerkey = %s AND snapshotdatekey = %s""",
-                (entry[4], entry[5], entry[6], customer_fk, time_key),
+                "SELECT d.demographickey FROM dimdemographic AS d WHERE d.maritalstatus = %s AND d.ageband = %s AND d.yearlyincomelevel = %s AND d.numbercarsowned = %s AND d.education = %s AND d.occupation = %s AND d.ishomeowner = %s",
+                parse_demographic(ms_cur.fetchone()[0]),
             )
+            demographic_fk = pg_cur.fetchone()[0]
 
-            max_update_timestamp = max(max_update_timestamp, entry[-1])
+            pg_cur.execute(
+                "SELECT d.customerkey FROM dimcustomer AS d WHERE d.customerid = %s",
+                (customerID,),
+            )
+            customer_fk = pg_cur.fetchone()[0]
+
+            # Generate snapshots for all month since their first purchase if it does not exist
+            ms_cur.execute(START_DATE_SQL, (customerID,))
+            result = ms_cur.fetchone()
+            start_date = _date_conversion(result[0].date())
+
+            for year, month in _month_iterator(start_date, parsed_run_timestamp):
+                # Create the time key
+                time_key = year * 10000 + month * 100 + calendar.monthrange(year, month)[1]
+                # Attempt to insert default data, on conflict do nothing.
+                pg_cur.execute(
+                    """
+                    INSERT INTO factcustomermonthlysnapshot (customerkey, snapshotdatekey, demographickey, geographickey, segmentkey, recency_score, frequency_score, monetary_score)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (customerkey, snapshotdatekey) DO NOTHING""",
+                    (customer_fk, time_key, demographic_fk, geographic_fk, None, 1, 1, 1),
+                )
+
+            # Update months where the customer has updated header
+            # DO NOT TOUCH demographic, geographic key. Just search by customer and snapshot date key.
+
+            for entry in transactions:
+                time_key = entry[1] * 10000 + entry[2] * 100 + entry[3]
+                pg_cur.execute(
+                    """
+                    UPDATE factcustomermonthlysnapshot
+                    SET recency_score = %s, frequency_score = %s, monetary_score = %s
+                    WHERE customerkey = %s AND snapshotdatekey = %s""",
+                    (entry[4], entry[5], entry[6], customer_fk, time_key),
+                )
+
+                max_update_timestamp = max(max_update_timestamp, entry[-1])
+
+        # Finished loading this batch, we update the metadata and commit.
+        pg_cur.execute("UPDATE etlmeta_initialload SET batchid = %s, loadingtimestamp = %s", (last_id, max_update_timestamp))
+        pg_conn.commit()
+        current_batch_id += 1
 
     return max_update_timestamp

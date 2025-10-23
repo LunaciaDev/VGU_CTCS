@@ -45,8 +45,9 @@ CREATE TABLE IF NOT EXISTS ETLMeta_TableTimestamp (
 CREATE TABLE IF NOT EXISTS ETLMeta_InitialLoad (
   ID INT PRIMARY KEY CHECK (ID = 1), -- This table must only have one single row.
   LoadFinished BOOLEAN, -- has we finished with the load?
-  BatchID INT, -- which customerID has we reached?
-  IncrementalBatchID INT -- What batch ID we reached in incremental load?
+
+  BatchID INT NULL, -- which customerID has we reached?
+  LoadingTimestamp TIMESTAMP NULL -- Current largest fact timestamp
 );
 
 CREATE TABLE IF NOT EXISTS FactCustomerMonthlySnapshot (
