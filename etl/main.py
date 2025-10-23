@@ -113,7 +113,7 @@ def _helper_incremental_load_dimension(
     key_function_iterator,
 ):
     for key, function in key_function_iterator:
-        logger.info("Attempting to load %s dimension", key)
+        logger.info("Attempting to incrementally load %s dimension", key)
 
         # Check for the update timestamp
         pg_cur.execute(
@@ -129,6 +129,8 @@ def _helper_incremental_load_dimension(
             (timestamp, TABLE_KEYS[key]),
         )
         pg_conn.commit()
+
+        logger.info("Finished loading %s dimension", key)
 
 
 def _incremental_load(pg_conn: psycopg.Connection):
@@ -155,19 +157,34 @@ def _incremental_load(pg_conn: psycopg.Connection):
                     ),
                 )
 
+                logger.info("Incrementally loading the facts.")
+
                 pg_cur.execute(
                     "SELECT * FROM etlmeta_tabletimestamp AS t WHERE t.tablekey = %s",
                     (TABLE_KEYS["fact"], ),
                 )
                 timestamp = pg_cur.fetchone()[1]
 
-                load_fact(
+                timestamp = load_fact(
                     ms_cur=mssql_cur,
                     pg_cur=pg_cur,
                     pg_conn=pg_conn,
                     run_timestamp=date(2014, 7, 25),
                     last_updated_timestamp=timestamp,
                 )
+                # Log timestamp
+                pg_cur.execute(
+                    "UPDATE etlmeta_tabletimestamp SET modifieddate = %s WHERE tablekey = %s",
+                    (timestamp, TABLE_KEYS["fact"]),
+                )
+                # Mark initial load as finished
+                pg_cur.execute(
+                    "UPDATE etlmeta_factload SET loadfinished = %s, batchid = %s, loadingtimestamp = %s",
+                    (True, None, None),
+                )
+                pg_conn.commit()
+
+                logger.info("Facts incremental load finished.")
 
 def main():
     # Check with the warehouse to see if we are doing initial load or incremental load.
